@@ -21,6 +21,7 @@
 - Базовый срок доставки до центрального склада — около `30` дней. Это нужно показывать клиенту в каталоге и в чекауте.
 - Складская сеть расширяется новыми типами: `merchant_origin`, `central`, `regional`, `pickup_point`.
 - Доставка для marketplace-заказов не использует такси. Для них в `order_deliveries` появляется внутренний канал `internal`.
+- Для marketplace-заказов споры полностью отключены: dispute-ветки, dispute-UI и dispute-статусы для них не используются.
 - `operator` полностью переименовывается в `employee`; старый домен операторов можно заменять целиком.
 - Админ сохраняет полный доступ и может работать в мобильном приложении так же, как сотрудник склада/ПВЗ. Отдельная роль для админа не нужна.
 - В первом релизе вместо QR используется `external_order_id`: сотрудники сканируют штрихкод/маркировку поставщика или вводят `external_order_id` вручную.
@@ -173,14 +174,9 @@ stateDiagram-v2
   merchant_pending --> delivering: получен external_order_id
   merchant_pending --> cancelled: поставщик не принял заказ
   delivering --> delivered: товар выдан в ПВЗ
-  delivering --> dispute: утеря / повреждение
   delivered --> inspection: клиент осматривает в ПВЗ
   inspection --> completed: клиент подтвердил
-  inspection --> dispute: претензия
-  dispute --> refunded
-  dispute --> completed
   completed --> [*]
-  refunded --> [*]
   cancelled --> [*]
 ```
 
@@ -217,7 +213,7 @@ stateDiagram-v2
 | `in_transit_to_pickup_point` | `delivering` | сотрудник регионального склада / админ |
 | `at_pickup_point` | `delivering` | сотрудник ПВЗ / админ |
 | `picked_up_by_client` | `delivered` | сотрудник ПВЗ / админ |
-| `failed` | `cancelled` / `dispute` | backend по правилам `DeliveryStatusService` |
+| `failed` | `cancelled` | backend по правилам `DeliveryStatusService` |
 
 ## Предлагаемый подход
 
@@ -282,6 +278,7 @@ stateDiagram-v2
    - На товаре возвращаем `origin_country`, `is_international`, `estimated_delivery_days_min`.
    - В чекауте marketplace-заказа не даём выбрать домашний адрес, только ПВЗ.
    - В карточке заказа клиента отдаём ленту статусов из `DeliveryStatusService`.
+   - Для marketplace-заказов не показываем dispute-блоки, dispute-кнопки и dispute-статусы.
 
 10. **Выбор ПВЗ клиентом**
    - `GET /client/pickup-points` — список активных ПВЗ с координатами, slug, городом и графиком работы.
