@@ -12,7 +12,7 @@
 
 - Появляется второй тип мерчанта `marketplace` в дополнение к существующему `local`.
 - Marketplace-мерчантов создаёт только администратор из admin-panel; саморегистрации для них нет.
-- Для MVP у нас один marketplace-провайдер. Архитектуру делаем так, чтобы позже можно было добавить новых, но отдельного набора сценариев под несколько провайдеров сейчас не закладываем.
+- Для MVP у нас один marketplace-провайдер — **聚水潭 (Jushuitan)** ERP Open Platform ([документация интеграции](./jushuitan-open-platform-integration.md)). Архитектуру делаем так, чтобы позже можно было добавить новых, но отдельного набора сценариев под несколько провайдеров сейчас не закладываем.
 - Импорт каталога marketplace-мерчанта делается отдельной cron-задачей на мерчанта; регистрация этой задачи пока ручная.
 - Backend работает только в исходящем направлении: запрашивает каталог и создаёт заказ во внешнем API.
 - Merchant-panel для marketplace-мерчанта не нужен в MVP. Взаимодействие с поставщиком минимальное и происходит через backend/API, а не через UI.
@@ -60,6 +60,7 @@
 | 23 | Наценка `5%` от суммы заказа, настраивается в Settings | «Cargo pricing и наценка» |
 | 24 | Один marketplace сейчас, но возможность расширения оставить | «Один провайдер в MVP и точка расширения» |
 | 25 | Админ тоже может пользоваться мобильным приложением | «Сотрудники и мобильное API» |
+| 26 | MVP-провайдер — 聚水潭 Open Platform (Китай) | «Интеграция Jushuitan», [jushuitan-open-platform-integration.md](./jushuitan-open-platform-integration.md) |
 
 ## Чекаут marketplace-заказа: выбор ПВЗ на карте
 
@@ -84,7 +85,7 @@ sequenceDiagram
   participant C as Клиент (SPA)
   participant API as marketplace-backend
   participant DB as PostgreSQL
-  participant M as API поставщика
+  participant M as 聚水潭 API
 
   C->>API: GET /client/pickup-points?near_lat&near_lng
   API->>DB: SELECT active pickup_points
@@ -98,9 +99,9 @@ sequenceDiagram
   API-->>C: 201 order
 
   Note over API,M: после успешной оплаты
-  API->>M: POST /orders { order, items, destination_city, pickup_point }
-  M-->>API: 201 { external_order_id }
-  API->>DB: save external_order_id
+  API->>M: POST /open/jushuitan/orders/upload (shop_id, so_id, CN receiver, items, pay)
+  M-->>API: { code:0, data: { o_id } }
+  API->>DB: save external_order_id = o_id
   API->>DB: create order_delivery(provider=internal, status=in_transit_to_central)
   API->>DB: estimated_arrival_at = now + 30 days
 ```
@@ -113,7 +114,7 @@ sequenceDiagram
 - Нашей собственной единой таблицы складов для центрального/региональных узлов пока нет.
 - `order_deliveries` поддерживает только `jurataxi` и набор локальных статусов.
 - В админке есть модули мерчантов, ПВЗ и складов, но логики транзита через несколько узлов нет.
-- В cron-worker нет адресных задач под marketplace-провайдера.
+- В cron-worker нет адресных задач под marketplace-провайдера (Jushuitan: `POST /open/sku/query`, см. [интеграцию](./jushuitan-open-platform-integration.md)).
 - Клиентский каталог не показывает зарубежное происхождение товара и ориентир по сроку доставки.
 
 ## Текущий флоу заказа (local-мерчант)
@@ -147,7 +148,7 @@ Marketplace-заказ использует общую шапку `orders.status
 ```mermaid
 flowchart LR
   Client[Клиент<br/>оформляет заказ]
-  SupplierAPI[(API поставщика)]
+  SupplierAPI[(聚水潭 API)]
   CN[Склад поставщика в Китае]
   Central[Центральный склад<br/>Душанбе]
   Regional[Региональный склад<br/>города клиента]
@@ -241,13 +242,13 @@ stateDiagram-v2
 
 4. **Admin-panel и backend-конфиг marketplace-мерчанта**
    - В admin-panel добавляем форму создания/редактирования marketplace-мерчанта.
-   - Для MVP достаточно полей на `merchants`: `provider_code`, `api_base_url`, `api_key_ref`, `catalog_sync_enabled`, `last_catalog_sync_at`, `origin_country_code`.
+   - Для MVP: `provider_code=jushuitan`, `api_base_url`, `api_key_ref`, `api_secret_ref`, `access_token_ref`, `jst_shop_id`, адрес CN-приёмки (`china_receiver_*`), `catalog_sync_enabled`, `last_catalog_sync_at`, `origin_country_code=CN`. Полный список — в [jushuitan-open-platform-integration.md](./jushuitan-open-platform-integration.md#61-конфиг-marketplace-мерчанта).
    - Отдельный merchant-panel для marketplace не делаем.
 
-5. **Создание внешнего заказа через API поставщика**
-   - После успешной оплаты backend вызывает `createRemoteOrder`.
-   - В ответ получает `external_order_id`.
-   - `external_order_id` сохраняется в `order_deliveries` как основной внешний идентификатор.
+5. **Создание внешнего заказа через API поставщика (Jushuitan)**
+   - После успешной оплаты backend вызывает `createRemoteOrder` → `POST /open/jushuitan/orders/upload`.
+   - В ответ получает `o_id` → сохраняем как `external_order_id`; `so_id` (наш order id) — в `external_order_ref`.
+   - `external_order_id` сохраняется в `order_deliveries` как основной внешний идентификатор (штрихкод/накладная поставщика).
    - Если внешний заказ не создался, заказ не переводится в рабочий logistics-флоу.
    - Входящих обновлений статусов и отдельных ключей для них в архитектуре нет.
 
@@ -312,12 +313,13 @@ stateDiagram-v2
      - `marketplace_service_fee`.
 
 14. **Один провайдер в MVP и точка расширения**
-   - На первом этапе реализуем один адаптер `MarketplaceProviderAdapter`.
-   - Достаточно интерфейса:
-     - `fetchCatalog`,
-     - `createRemoteOrder`,
+   - На первом этапе реализуем `JushuitanProviderAdapter` (`provider_code=jushuitan`).
+   - Интерфейс `MarketplaceProviderAdapter`:
+     - `fetchCatalog` → `POST /open/sku/query` (+ опционально `/open/inventory/query`),
+     - `createRemoteOrder` → `POST /open/jushuitan/orders/upload`,
      - `normalizeProduct`.
-   - Когда появится второй provider, конфиг можно вынести из `merchants` в отдельную таблицу `marketplace_integrations`, но для MVP это не нужно.
+   - Спецификация API, sandbox, подпись, маппинг полей: [jushuitan-open-platform-integration.md](./jushuitan-open-platform-integration.md).
+   - Когда появится второй provider, конфиг можно вынести из `merchants` в `marketplace_integrations`.
 
 ## Этапы реализации
 
@@ -338,8 +340,10 @@ stateDiagram-v2
    - Фильтрация списка мерчантов по типу.
 
 4. **Импорт каталога marketplace-мерчанта (cron)**
-   - Отдельная задача в `marketplace-cron-worker`.
-   - Upsert товаров, журнал последней синхронизации, обработка ошибок.
+   - Отдельная задача в `marketplace-cron-worker` на мерчанта.
+   - Jushuitan: инкремент `POST /open/sku/query` по `modified_begin/end` (окно ≤7 дней), пагинация, upsert по `sku_id`.
+   - Опционально: остатки `POST /open/inventory/query`.
+   - Журнал `last_catalog_sync_at`, обработка ошибок (см. [§5.1](./jushuitan-open-platform-integration.md#51-fetchcatalog--post-openskuquery)).
 
 5. **Создание заказа у поставщика**
    - После оплаты вызвать `createRemoteOrder`.
@@ -383,8 +387,27 @@ stateDiagram-v2
    - Один адаптер в MVP.
    - Выделенный интерфейс, чтобы позже без переписывания checkout и cron добавить второго провайдера.
 
+## Интеграция Jushuitan (MVP-провайдер)
+
+Полная документация API, sandbox-credentials, подпись запросов, каталог эндпоинтов и маппинг на наш домен:
+
+**[jushuitan-open-platform-integration.md](./jushuitan-open-platform-integration.md)**
+
+Кратко для реализации:
+
+| Наш метод | Jushuitan API | Ключевой результат |
+|-----------|---------------|-------------------|
+| Cron `fetchCatalog` | `POST /open/sku/query` | `external_sku_id` = `sku_id` |
+| Cron stock (опц.) | `POST /open/inventory/query` | `qty` / available |
+| `createRemoteOrder` | `POST /open/jushuitan/orders/upload` | `external_order_id` = `o_id` |
+| Admin setup | `POST /open/shops/query` | `jst_shop_id` |
+
+Sandbox: [docId=110](https://openweb.jushuitan.com/doc?docId=110), base URL `https://dev-api.jushuitan.com/`.
+
 ## Открытые вопросы
 
 - Какое стартовое значение `rate_per_kg` используем для первого marketplace-мерчанта в MVP.
 - Нужен ли для клиента отдельный видимый статус «в пути в Душанбе ~30 дней», или достаточно текста в карточке заказа и общего `delivering`.
 - Должен ли `estimated_arrival_at` быть фиксированным правилом `+30 days`, или это тоже нужно выносить в Settings как настраиваемый SLA.
+- Jushuitan: адрес `receiver_*` для upload — наш консолидационный склад в Китае (уточнить у поставщика).
+- Jushuitan: на этикетке печатается `o_id` или `so_id` — см. [§9 интеграции](./jushuitan-open-platform-integration.md#9-открытые-вопросы-jst).
