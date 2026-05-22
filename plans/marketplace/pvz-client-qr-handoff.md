@@ -145,8 +145,24 @@ const { handoff_token, expires_at } = await api.post('/client/pvz-handoff/token'
 | ------ | ---- | ---- | -------- |
 | `POST` | `/employee/warehouse-ops/pvz-handoff/resolve` | employee | `{ handoff_token }` → список deliveries + метаданные для UI |
 | `POST` | `/employee/warehouse-ops/pvz-handoff/confirm` | employee | `{ delivery_ids: string[] }` → batch transition → `picked_up_by_client` |
+| `POST` | `/employee/warehouse-ops/pvz-handoff/client-products` | employee | `{ client_id, page?, limit? }` → постраничный список товаров клиента на текущем ПВЗ сотрудника |
 
 Расширение существующего `warehouse-ops`, те же `assertEmployeeWarehouseAccess` и `transition` внутри сервиса.
+
+#### Response `client-products` (MVP)
+
+```typescript
+FindManyResponseBase<{
+  product_id: string;
+  product_title: string;
+  product_price: number;
+  order_id: string;
+  quantity: number;
+  product_image: string; // первый URL из products.images
+}>
+```
+
+Фильтр: `order_deliveries.status = 'at_pickup_point'`, `current_warehouse_id = employees.warehouse_id`, `orders.client_id = :client_id`.
 
 ### Response resolve (черновик)
 
