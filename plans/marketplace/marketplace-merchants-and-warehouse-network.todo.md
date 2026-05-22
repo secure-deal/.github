@@ -69,6 +69,7 @@
 
 ## Still open / follow-up (phase 4+)
 
+- [ ] **PVZ QR handoff (клиент → сотрудник)** — [pvz-client-qr-handoff.md](./pvz-client-qr-handoff.md) / [todo](./pvz-client-qr-handoff.todo.md)
 - [ ] Shared npm package for JST client (cron + backend dedup)
 - [ ] Admin: `POST open/shops/query` for `jst_shop_id` resolve tool
 - [ ] Cron optional inventory sync

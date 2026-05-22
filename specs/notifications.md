@@ -197,7 +197,7 @@ erDiagram
 | `recipient_notification_id` | `uuid` FK               | ссылка на `notification_recipients.id`                   | Какая inbox-строка доставляется.                                                                                                                                    |
 | `channel`                   | `text`                  | `in_app`, `ws`, `sms`, `push`, `email`                   | Канал доставки. Реально обрабатываются `in_app`, `ws`, `sms`; `push/email` присутствуют в schema/type contract, но сейчас будут skipped/not supported при dispatch. |
 | `status`                    | `text`                  | `pending`, `sent`, `failed`, `retrying`, `skipped`       | Текущее состояние доставки по каналу.                                                                                                                               |
-| `provider`                  | `text`, nullable        | `internal_in_app`, `internal_ws`, `http_sms`, `noop_sms` | Кто/что отвечает за доставку.                                                                                                                                       |
+| `provider`                  | `text`, nullable        | `internal_in_app`, `internal_ws`, `mock_sms`, `http_sms` | Кто/что отвечает за доставку.                                                                                                                                       |
 | `attempts`                  | `integer`               | `0`, `1`, `2`, `3`                                       | Количество попыток.                                                                                                                                                 |
 | `worker_id`                 | `text`, nullable        | `<hostname>:<pid>:<random>`                              | Worker, который claim'нул delivery.                                                                                                                                 |
 | `claimed_at`                | `timestamptz`, nullable | timestamp                                                | Когда worker взял delivery в работу.                                                                                                                                |
@@ -256,7 +256,7 @@ Critical alerts REST-фильтр выбирает только `ne.kind = 'crit
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
 | `in_app` | Только создает durable inbox row. Отдельной внешней доставки нет.                                                                                                                          | `sent`, `provider=internal_in_app`, `attempts=1`, `sent_at=now()`.                                        |
 | `ws`     | Доставляет `notification.created` через Socket.IO `/notifications`.                                                                                                                        | `pending`, `provider=internal_ws`, `attempts=0`.                                                          |
-| `sms`    | Отправляет `message` на телефон клиента/мерчанта через HTTP SMS provider.                                                                                                                  | `pending`, `provider=http_sms` в worker pipeline или `noop_sms` в backend fanout до фактической отправки. |
+| `sms`    | Отправляет `message` на телефон клиента/мерчанта через SMS provider factory (`mock_sms` по умолчанию).                                                                                      | `pending`, `provider=mock_sms` при fanout; после dispatch `status=sent`, `provider=mock_sms`.               |
 | `push`   | Зарезервировано в БД и TypeScript contracts, но V1 не имеет push provider. Если producer явно укажет этот канал, delivery row создастся и попадет в очередь как любой non-`in_app` канал.  | `pending`, `provider=null`, `attempts=0`; при dispatch станет `skipped` с `CHANNEL_NOT_SUPPORTED`.        |
 | `email`  | Зарезервировано в БД и TypeScript contracts, но V1 не имеет email provider. Если producer явно укажет этот канал, delivery row создастся и попадет в очередь как любой non-`in_app` канал. | `pending`, `provider=null`, `attempts=0`; при dispatch станет `skipped` с `CHANNEL_NOT_SUPPORTED`.        |
 
@@ -266,7 +266,7 @@ Critical alerts REST-фильтр выбирает только `ne.kind = 'crit
 | -------- | -------------------- | -------------- | -------------------------------------- | -------------------------- | ----------------------------------------- | ------------------------------------------- | ---------------------------------------------------- |
 | `in_app` | да                   | да             | да                                     | нет, потому что уже `sent` | не нужен                                  | не нужен                                    | Durable inbox создан.                                |
 | `ws`     | да                   | да             | да                                     | да                         | да                                        | да, SQL выбирает `channel IN ('ws', 'sms')` | Realtime `notification.created` или retry/fail/skip. |
-| `sms`    | да                   | да             | да                                     | да                         | да                                        | да, SQL выбирает `channel IN ('ws', 'sms')` | HTTP SMS или skip/retry/fail.                        |
+| `sms`    | да                   | да             | да                                     | да                         | да                                        | да, SQL выбирает `channel IN ('ws', 'sms')` | Mock SMS (все среды) или skip/retry/fail.             |
 | `push`   | да                   | да             | да, если producer явно передал `push`  | да при первичном enqueue   | да, но только как unsupported → `skipped` | нет, recovery scan не выбирает `push`       | Зарезервирован, provider отсутствует.                |
 | `email`  | да                   | да             | да, если producer явно передал `email` | да при первичном enqueue   | да, но только как unsupported → `skipped` | нет, recovery scan не выбирает `email`      | Зарезервирован, provider отсутствует.                |
 
@@ -292,7 +292,7 @@ stateDiagram-v2
 | `sent`     | Канал успешно доставлен или `in_app` row создан.                                               |
 | `failed`   | Канал не доставлен после максимального числа retry.                                            |
 | `retrying` | Была retryable ошибка; `next_retry_at` указывает, когда повторять.                             |
-| `skipped`  | Доставку осознанно пропустили: нет WS room, нет телефона, SMS не настроен, канал не поддержан. |
+| `skipped`  | Доставку осознанно пропустили: нет WS room, нет телефона, канал не поддержан.                  |
 
 ## 6. Publish input contract
 
@@ -949,22 +949,36 @@ REST всегда возвращает camelCase:
 
 ## 12. SMS contract
 
-SMS реально отправляется только для `recipient_role` `client` и `merchant`, потому что SQL ищет телефон только в таблицах `clients` и `merchants`.
+Канал `sms` — отдельный тип доставки в `NotificationChannel.SMS`. Транспорт выбирается через **SMS provider factory** в backend и cron-worker:
+
+| Компонент | Путь |
+| --------- | ---- |
+| Backend factory | `marketplace-backend/src/core/notifications/services/providers/sms-provider.factory.ts` |
+| Backend mock | `marketplace-backend/src/core/notifications/services/providers/mock-sms.provider.ts` |
+| Cron factory | `marketplace-cron-worker/src/core/notifications/providers/sms-provider.factory.ts` |
+| Cron mock | `marketplace-cron-worker/src/core/notifications/providers/mock-sms.provider.ts` |
+| HTTP (зарезервирован) | `http-sms.provider.ts` — не подключён в DI, до контракта с реальным провайдером |
+
+**Текущее поведение (все среды):** factory всегда возвращает `MockSmsProvider` (`provider=mock_sms`). Провайдер принимает `{ phone, message }`, пишет structured log и возвращает успех с `providerMessageId` вида `mock-<uuid>`. Реальная отправка SMS не выполняется.
+
+SMS реально обрабатывается только для `recipient_role` `client` и `merchant`, потому что SQL ищет телефон только в таблицах `clients` и `merchants`.
 
 ```mermaid
 flowchart TD
-  Delivery["delivery channel=sms"] --> Config{"NOTIFICATIONS_SMS_HTTP_URL set?"}
-  Config -- no --> SkippedConfig["status=skipped<br/>SMS_NOT_CONFIGURED"]
-  Config -- yes --> Phone["SELECT phone FROM clients/merchants"]
+  Delivery["delivery channel=sms"] --> Factory["NotificationSmsProviderFactory.getProvider()"]
+  Factory --> Mock["MockSmsProvider"]
+  Mock --> Phone["SELECT phone FROM clients/merchants"]
   Phone --> HasPhone{"phone found?"}
   HasPhone -- no --> SkippedPhone["status=skipped<br/>SMS_RECIPIENT_UNAVAILABLE"]
-  HasPhone -- yes --> Post["POST NOTIFICATIONS_SMS_HTTP_URL"]
-  Post --> Ok{"2xx?"}
-  Ok -- yes --> Sent["status=sent<br/>provider=http_sms"]
-  Ok -- no --> Retry["status=retrying/failed<br/>SMS_DELIVERY_FAILED"]
+  HasPhone -- yes --> Send["mock send: log + success"]
+  Send --> Sent["status=sent<br/>provider=mock_sms"]
 ```
 
-HTTP request to provider:
+При fanout для SMS в `notification_deliveries.provider` сразу пишется `mock_sms` (раньше `noop_sms`).
+
+### 12.1 Будущий HTTP SMS provider (не активен)
+
+Когда появится контракт с внешним шлюзом, factory сможет переключаться на `HttpSmsProvider` по env (например `NOTIFICATIONS_SMS_PROVIDER=http`). Запрос:
 
 ```http
 POST <NOTIFICATIONS_SMS_HTTP_URL>
@@ -982,7 +996,7 @@ Body:
 }
 ```
 
-Provider response may include `messageId` or `id`; code reads it, but current delivery table does not persist provider message id.
+Ответ может содержать `messageId` или `id`; delivery table пока не сохраняет provider message id.
 
 ## 13. Event catalog
 
@@ -1373,7 +1387,7 @@ END
 | --------------------------- | -------------------------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `WS_ROOM_EMPTY`             | Backend inline `NotificationDeliveryService`       | `skipped`               | Получатель offline на этом backend instance.                                                                   |
 | `WS_DELIVERY_FAILED`        | Backend inline или cron-worker WS publish          | `retrying` или `failed` | Ошибка WS emit / Redis PubSub publish.                                                                         |
-| `SMS_NOT_CONFIGURED`        | SMS dispatch                                       | `skipped`               | `NOTIFICATIONS_SMS_HTTP_URL` не задан.                                                                         |
+| `SMS_NOT_CONFIGURED`        | SMS dispatch (legacy `http_sms` only)              | `skipped`               | `NOTIFICATIONS_SMS_HTTP_URL` не задан; с `mock_sms` не используется.                                           |
 | `SMS_RECIPIENT_UNAVAILABLE` | SMS dispatch                                       | `skipped`               | Телефон получателя не найден.                                                                                  |
 | `SMS_DELIVERY_FAILED`       | SMS provider returned non-2xx / request failed     | `retrying` или `failed` | Ошибка SMS provider'а.                                                                                         |
 | `CHANNEL_NOT_SUPPORTED`     | Dispatch channel не `ws`/`sms`/`in_app`            | `skipped`               | `push/email` пока не реализованы в V1; если такие delivery rows дошли до dispatch, они завершаются этим кодом. |
@@ -1433,9 +1447,9 @@ Heartbeat jobs в cron-worker предназначены для frontend smoke-�
 | `NOTIFICATIONS_DELIVERY_BATCH_SIZE`    | `50`             | Размер batch для backend `dispatchDue`.                                                 |
 | `NOTIFICATIONS_DELIVERY_MAX_ATTEMPTS`  | `3`              | Максимум попыток доставки.                                                              |
 | `NOTIFICATIONS_CLAIM_STUCK_SECONDS`    | `60`             | Через сколько claim считается зависшим в backend SQL paths.                             |
-| `NOTIFICATIONS_SMS_HTTP_URL`           | unset            | URL SMS provider'а.                                                                     |
-| `NOTIFICATIONS_SMS_HTTP_TOKEN`         | unset            | Bearer token для SMS provider'а.                                                        |
-| `NOTIFICATIONS_SMS_SENDER`             | unset            | Sender field для SMS body.                                                              |
+| `NOTIFICATIONS_SMS_HTTP_URL`           | unset            | URL HTTP SMS gateway (только при `NOTIFICATIONS_SMS_PROVIDER=http`, сейчас не используется). |
+| `NOTIFICATIONS_SMS_HTTP_TOKEN`         | unset            | Bearer token для HTTP SMS.                                                              |
+| `NOTIFICATIONS_SMS_SENDER`             | unset            | Sender field для HTTP SMS body.                                                         |
 
 ### 21.2 Cron-worker env defaults
 
@@ -1503,7 +1517,7 @@ POST /api/client/notifications/<notificationId>/read
 
 Для события с `channels: ['in_app', 'ws', 'sms']`:
 
-- если `NOTIFICATIONS_SMS_HTTP_URL` unset → delivery `skipped`, `last_error_code=SMS_NOT_CONFIGURED`;
+- factory использует `mock_sms`: лог `{ event: 'sms_mock_sent', phone, messagePreview, messageLength }`;
 - если у recipient нет phone → `skipped`, `SMS_RECIPIENT_UNAVAILABLE`;
-- если provider вернул non-2xx → `retrying` до max attempts, затем `failed`;
-- если provider вернул 2xx → `sent`, `provider=http_sms`, `sent_at` заполнен.
+- при успехе mock → `sent`, `provider=mock_sms`, `sent_at` заполнен;
+- при ошибке transport (будущий HTTP) → `retrying` до max attempts, затем `failed`, `SMS_DELIVERY_FAILED`.
