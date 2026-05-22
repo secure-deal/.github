@@ -319,12 +319,23 @@ sequenceDiagram
 - `marketplace-employee-app` — экран QR
 - `marketplace-spa` — экран «Показать QR»
 
+## Статус реализации (backend MVP)
+
+| Компонент | Статус |
+| --------- | ------ |
+| `PvzHandoffTokenService` + Redis active/used `jti` | ✅ |
+| `POST /client/pvz-handoff/token` | ✅ |
+| `POST .../pvz-handoff/resolve` | ✅ |
+| `POST .../pvz-handoff/confirm` | ✅ |
+| `POST .../pvz-handoff/client-products` | ✅ |
+| SPA / employee-app UI | ⏳ phase 4.0 frontend |
+
 ## Открытые вопросы
 
-- [ ] Отдельный `PVZ_HANDOFF_SECRET` vs общий `JWT_SECRET`?
+- [x] Отдельный `PVZ_HANDOFF_SECRET` (используется `Envs.PVZ_HANDOFF_SECRET`, не access JWT).
 - [x] Инвалидация предыдущего токена при каждом `POST /token` — Redis active `jti` (MVP).
-- [ ] One-time scan на `resolve` (отдельно от перевыпуска QR)?
-- [ ] Что показывать в `client_hint`: последние 4 цифры телефона, имя из профиля, или оба?
+- [x] One-time scan на `resolve` — Redis `pvz:handoff:used:{jti}` (MVP, phase 4.1 в плане отмечен как опция — включён).
+- [x] `client_hint`: последние 4 цифры телефона (`maskPhoneLastFour`).
 - [ ] Нужен ли агрегированный `complete-delivery` batch для клиента (сейчас по одному `order_id`)?
 
 ---
