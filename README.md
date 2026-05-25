@@ -7,6 +7,7 @@ This folder is the trimmed, current documentation set. It keeps only the docs th
 | Path                                             | Purpose                                                            |
 | ------------------------------------------------ | ------------------------------------------------------------------ |
 | `specs/orders.md`                                | Current order and checkout contract.                               |
+| `specs/employee-warehouse-ops.md`                | Employee warehouse/PVZ API: lookup, queue, transitions, QR handoff. |
 | `specs/disputes.md`                              | Current dispute lifecycle, chat, and operator resolution contract. |
 | `specs/notifications.md`                         | Current inbox, eventing, and realtime notification contract.       |
 | `specs/product-attributes/*`                     | Active product-attribute contracts.                                |
