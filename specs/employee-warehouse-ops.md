@@ -8,20 +8,24 @@
 
 API покрывает:
 
-- поиск доставки по внешнему номеру поставщика (`external_order_id`);
-- очередь доставок на складе сотрудника;
-- **стандартную** смену статуса по маршруту заказа (central → regional → ПВЗ из `order_deliveries.pickup_point_id`);
-- **ручную** смену статуса с явным `warehouse_id` (нестандартный маршрут, исправление, админ);
-- выдачу клиенту по QR (batch handoff);
-- список товаров, готовых к выдаче на ПВЗ сотрудника.
+- поиск доставки по внешнему номеру поставщика (`external_order_id`) с маршрутом складов и полным списком товаров;
+- сводку заказов на складе сотрудника (входящие / на точке / убывшие);
+- **автоматическую** смену статуса по маршруту заказа (следующий шаг выводится из JWT + склада сотрудника, без `next_status` в теле);
+- **ручную** смену статуса с явным `warehouse_id` (нестандартный маршрут, исправление);
+- выдачу клиенту по QR (batch handoff).
 
 Не входит в scope: admin CRUD платформенных складов и сотрудников (см. `platform-warehouses`, `warehouse-hub`), клиентский `complete-delivery`, генерация handoff-токена (`POST /client/pvz-handoff/token`).
+
+Удалённые маршруты (больше не используются):
+
+- `GET /employee/warehouse-ops/deliveries` — заменён на `GET /employee/warehouse-ops/warehouse-orders`;
+- `POST /employee/warehouse-ops/pvz-handoff/client-products` — товары отдаются в `orders/lookup` без пагинации.
 
 ## Authentication
 
 | Actor | JWT | Привязка к складу |
 | --- | --- | --- |
-| Сотрудник | employee | `employees.warehouse_id`; доступ к доставке — `order_deliveries.current_warehouse_id` |
+| Сотрудник | employee | `employees.warehouse_id`; доступ к доставке — текущий, входящий (`destination_warehouse_id`) или убывший (`in_transit_*` с `current_warehouse_id`) склад |
 | Админ (только manual) | admin | `isAdmin: true` в сервисе — без проверки actor warehouse |
 
 ## Platform warehouses and route
@@ -51,30 +55,17 @@ API покрывает:
 
 Глобально допустимые переходы — `DeliveryStatusService` (`MARKETPLACE_DELIVERY_TRANSITIONS` в `src/core/delivery/delivery-status.registry.ts`).
 
-### Статусы, которые может выставить сотрудник
+### Статусы, которые может выставить сотрудник (авто-transition)
 
-Enum `EmployeeMarketplaceTransitionStatus` (тело `transition` / `manual-transition`):
+Следующий шаг **не передаётся в теле**. Сервер выбирает единственный допустимый переход из `allowed_transitions` для склада сотрудника. Если переходов нет (шаг уже выполнен или не предусмотрен на этой точке) → `400068` `ORDER_INVALID_STATUS_TRANSITION`.
 
-| Value | Обычный actor warehouse (стандартный transition) |
-| --- | --- |
-| `at_central_warehouse` | central |
-| `in_transit_to_regional` | central |
-| `at_regional_warehouse` | regional |
-| `in_transit_to_pickup_point` | regional |
-| `at_pickup_point` | pickup_point (ПВЗ маршрута) |
-| `picked_up_by_client` | pickup_point |
+Целевые статусы сотрудника (как и раньше): `at_central_warehouse`, `in_transit_to_regional`, `at_regional_warehouse`, `in_transit_to_pickup_point`, `at_pickup_point`, `picked_up_by_client`.
 
-**Запрещённые целевые статусы** для employee/admin ops: `in_transit_to_central`, `failed` → `400070` `DELIVERY_TRANSITION_STATUS_FORBIDDEN`.
+**Запрещённые целевые статусы:** `in_transit_to_central`, `failed` → `400070` `DELIVERY_TRANSITION_STATUS_FORBIDDEN`.
 
 ### `allowed_transitions` в lookup
 
-Для сотрудника список фильтруется (`filterEmployeeAllowedTransitions`):
-
-1. исключаются запрещённые целевые статусы;
-2. `employees.warehouse_id` должен совпадать с **ожидаемым** складом для текущего статуса доставки на маршруте;
-3. для каждого кандидата проверяется, что `actorWarehouseId` стандартного перехода = складу сотрудника.
-
-Для админа в lookup возвращаются все registry-переходы, кроме `in_transit_to_central` и `failed`.
+Для сотрудника список фильтруется (`filterEmployeeAllowedTransitions`): сотрудник на ожидаемом actor-складе для текущего статуса. Пустой список означает, что на этой точке действие недоступно (или маршрут не сконфигурирован).
 
 ## Routes
 
@@ -82,13 +73,12 @@ Enum `EmployeeMarketplaceTransitionStatus` (тело `transition` / `manual-tran
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| `GET` | `/employee/warehouse-ops/orders/lookup` | Найти доставку по `external_order_id` |
-| `GET` | `/employee/warehouse-ops/deliveries` | Очередь доставок на складе сотрудника |
-| `POST` | `/employee/warehouse-ops/deliveries/{id}/transition` | Стандартный переход по маршруту заказа |
+| `GET` | `/employee/warehouse-ops/orders/lookup` | Найти доставку по `external_order_id` + маршрут + все товары |
+| `GET` | `/employee/warehouse-ops/warehouse-orders` | Заказы склада сотрудника: входящие / на точке / убывшие |
+| `POST` | `/employee/warehouse-ops/deliveries/{id}/transition` | Авто-переход на следующий шаг (тело пустое) |
 | `POST` | `/employee/warehouse-ops/deliveries/{id}/manual-transition` | Ручной переход с явным `warehouse_id` |
 | `POST` | `/employee/warehouse-ops/pvz-handoff/resolve` | Разобрать QR клиента (handoff token) |
 | `POST` | `/employee/warehouse-ops/pvz-handoff/confirm` | Пакетно подтвердить выдачу |
-| `POST` | `/employee/warehouse-ops/pvz-handoff/client-products` | Товары на выдаче на ПВЗ (пагинация) |
 
 ### Admin (`/admin/warehouse-ops`)
 
@@ -119,130 +109,74 @@ Enum `EmployeeMarketplaceTransitionStatus` (тело `transition` / `manual-tran
 | `external_order_id` | Внешний номер |
 | `pickup_point_name`, `pickup_point_city` | ПВЗ назначения |
 | `merchant_store_name` | Магазин marketplace-мерчанта |
-| `allowed_transitions` | Следующие статусы, доступные **этому** сотруднику на маршруте |
+| `allowed_transitions` | Следующие статусы, доступные **этому** сотруднику (для UI; transition их не требует) |
+| `routing` | Маршрут складов (см. ниже) |
+| `items` | **Все** позиции заказа (без пагинации) |
 
-**Ошибки:** `RESOURCE_NOT_FOUND`, `INSUFFICIENT_PERMISSIONS` (доставка не на складе сотрудника).
+**`routing` (объект):**
+
+| Field | Description |
+| --- | --- |
+| `from_warehouse` | Склад отправления для текущего этапа (`id`, `name`, `kind`, `city`) или `null` |
+| `to_warehouse` | Склад назначения текущего этапа (`in_transit_*`) |
+| `expected_warehouse` | Склад, на котором посылка **должна** оказаться на этом шаге |
+| `has_arrived_at_expected_warehouse` | `true`, если посылка уже принята на `expected_warehouse` (`at_*` на этой точке) |
+
+**`items[]`:** `product_id`, `product_title`, `product_price`, `quantity`, `product_image`, `product_slug` (опционально).
+
+**Доступ:** доставка видна, если она на складе сотрудника, **в пути на** него (`destination_warehouse_id`) или **убыла** с него (`in_transit_*` и `current_warehouse_id` = склад сотрудника).
+
+**Ошибки:** `RESOURCE_NOT_FOUND`, `INSUFFICIENT_PERMISSIONS`.
 
 ---
 
-### `GET /employee/warehouse-ops/deliveries`
+### `GET /employee/warehouse-ops/warehouse-orders`
 
-**Назначение:** рабочая очередь доставок на складе текущего сотрудника (до 50 записей).
+**Назначение:** сводка marketplace-доставок, связанных со складом текущего сотрудника.
 
-**Фильтр статусов в очереди:**
+**Response:** `WarehouseOrdersResponse`
 
-- `in_transit_to_central`
-- `at_central_warehouse`
-- `in_transit_to_regional`
-- `at_regional_warehouse`
-- `in_transit_to_pickup_point`
-- `at_pickup_point`
+| Section | Условие |
+| --- | --- |
+| `incoming` | `status IN (in_transit_to_central, in_transit_to_regional, in_transit_to_pickup_point)` и `destination_warehouse_id` = склад сотрудника |
+| `at_warehouse` | `current_warehouse_id` = склад сотрудника и `status IN (at_central_warehouse, at_regional_warehouse, at_pickup_point)` |
+| `departed` | `current_warehouse_id` = склад сотрудника и `status IN (in_transit_to_regional, in_transit_to_pickup_point)` — ушли на следующий этап (не включает `picked_up_by_client`) |
 
-**Response:** массив записей из `getDeliveriesAtWarehouseSql`.
+Каждая запись — `WarehouseOrderSummaryResponse` (идентификаторы, статус, маршрут `routing`, краткие поля заказа; без списка товаров — товары в `lookup`).
 
 ---
 
 ### `POST /employee/warehouse-ops/deliveries/{id}/transition`
 
-**Назначение:** стандартный переход — склады берутся из маршрута заказа, **`warehouse_id` в теле не передаётся**.
+**Назначение:** выполнить **единственный** допустимый следующий шаг для склада сотрудника. **Тело запроса пустое** (или `{}`).
 
 **Path:** `id` — UUID доставки.
 
-**Body:**
+Сервер:
 
-```json
-{
-  "next_status": "at_central_warehouse"
-}
-```
+1. Определяет `employees.warehouse_id` из JWT.
+2. Строит `allowed_transitions` как в lookup.
+3. Если ровно один переход — применяет его; если ноль — `ORDER_INVALID_STATUS_TRANSITION`; если больше одного — `ORDER_INVALID_STATUS_TRANSITION` (неоднозначность).
 
-| Field | Required | Description |
-| --- | --- | --- |
-| `next_status` | yes | `EmployeeMarketplaceTransitionStatus` |
+Склады для перехода — `resolveStandardTransitionWarehouses` (как раньше, без `warehouse_id` в теле).
 
-**Логика складов** (`resolveStandardTransitionWarehouses`):
+**Response:** `DeliveryLookupResponse` (обновлённый lookup).
 
-| `next_status` | `current_warehouse_id` | `destination_warehouse_id` | Actor (проверка сотрудника) |
-| --- | --- | --- | --- |
-| `at_central_warehouse` | central | — | central |
-| `in_transit_to_regional` | текущий или central | regional | central |
-| `at_regional_warehouse` | regional | — | regional |
-| `in_transit_to_pickup_point` | текущий или regional | pickup_point | regional |
-| `at_pickup_point` | pickup_point | — | pickup_point |
-| `picked_up_by_client` | pickup_point | — | pickup_point |
-
-Сотрудник должен работать на **actor** складе → иначе `400071` `DELIVERY_TRANSITION_ACTOR_WAREHOUSE_MISMATCH`.
-
-**Побочные эффекты:**
-
-- `order_deliveries.status`, `current_warehouse_id`, `destination_warehouse_id`;
-- `order_delivery_status_events`;
-- при необходимости — `orders.status`;
-- `at_pickup_point` → push/SMS клиенту;
-- audit: `delivery.status_changed` (`actor_type`: `employee` | `operator` для admin).
-
-**Response:** `DeliveryLookupResponse` (повторный lookup по `external_order_id`, если есть).
+**Ошибки:** `ORDER_INVALID_STATUS_TRANSITION`, `DELIVERY_TRANSITION_ACTOR_WAREHOUSE_MISMATCH`, `DELIVERY_ROUTE_WAREHOUSE_NOT_CONFIGURED`, `RESOURCE_NOT_FOUND`, `INSUFFICIENT_PERMISSIONS`.
 
 ---
 
 ### `POST /employee/warehouse-ops/deliveries/{id}/manual-transition`
 
-**Назначение:** переход с **явным** платформенным складом (нестандартный маршрут, другой regional/ПВЗ в городе, восстановление).
+Без изменений: переход с **явным** `warehouse_id` и `next_status`.
 
-**Body:**
-
-```json
-{
-  "next_status": "at_regional_warehouse",
-  "warehouse_id": "550e8400-e29b-41d4-a716-446655440000"
-}
-```
-
-| Field | Required | Description |
-| --- | --- | --- |
-| `next_status` | yes | `EmployeeMarketplaceTransitionStatus` |
-| `warehouse_id` | yes | UUID активного `warehouses` (`scope = platform`) |
-
-**Правила:**
-
-- Сотрудник: `delivery.current_warehouse_id` = `employees.warehouse_id` (доставка уже на его точке).
-- `warehouse_id.kind` должен соответствовать `next_status` (например `at_regional_warehouse` → `regional`) → иначе `400072` `DELIVERY_WAREHOUSE_KIND_MISMATCH`.
-- Для `in_transit_*`: `current_warehouse_id = null`, `destination_warehouse_id = warehouse_id`.
-- Для `at_*` / `picked_up_by_client`: `current_warehouse_id = warehouse_id`.
-
-**Audit:** `delivery.manual_status_changed`.
-
-**Admin:** `POST /admin/warehouse-ops/deliveries/{id}/manual-transition` — тот же body, без проверки actor warehouse (`isAdmin: true`).
+**Admin:** `POST /admin/warehouse-ops/deliveries/{id}/manual-transition`.
 
 ---
 
-### `POST /employee/warehouse-ops/pvz-handoff/resolve`
+### `POST /employee/warehouse-ops/pvz-handoff/resolve` / `confirm`
 
-**Назначение:** после скана QR клиента — посылки клиента в `at_pickup_point` на **складе сотрудника**.
-
-**Body:** `{ "handoff_token": "<JWT>" }` (см. [pvz-client-qr-handoff.md](../plans/marketplace/pvz-client-qr-handoff.md)).
-
-**Фильтр:** `status = at_pickup_point` и `current_warehouse_id = employees.warehouse_id`.
-
-**Audit:** `pvz.handoff_resolved`.
-
----
-
-### `POST /employee/warehouse-ops/pvz-handoff/confirm`
-
-**Назначение:** пакетно `at_pickup_point` → `picked_up_by_client` (1–100 UUID).
-
-Внутри — стандартный `transition` на каждый id. Клиент: `POST /client/orders/:id/complete-delivery`.
-
-**Audit:** `pvz.handoff_confirmed` на каждую доставку.
-
----
-
-### `POST /employee/warehouse-ops/pvz-handoff/client-products`
-
-**Назначение:** постраничный список позиций заказов на выдаче на ПВЗ сотрудника.
-
-**Body:** `page`, `limit` (`GetManyPaginatedBaseDto`). `client_id` не передаётся — выборка по складу сотрудника и `at_pickup_point`.
+Без изменений. `confirm` внутри вызывает transition → `picked_up_by_client`.
 
 ---
 
@@ -250,6 +184,7 @@ Enum `EmployeeMarketplaceTransitionStatus` (тело `transition` / `manual-tran
 
 | statusKey | When |
 | --- | --- |
+| `400068` | Нет допустимого следующего шага (transition без тела) |
 | `400070` | Целевой статус `in_transit_to_central` или `failed` |
 | `400071` | Сотрудник не на actor-складе стандартного перехода |
 | `400072` | `warehouse_id` не того `kind` для `next_status` (manual) |
@@ -260,8 +195,11 @@ Enum `EmployeeMarketplaceTransitionStatus` (тело `transition` / `manual-tran
 
 ```mermaid
 flowchart TB
-  subgraph standard [Стандартный маршрут]
+  subgraph scan [Скан коробки]
     L[GET orders/lookup] --> T[POST deliveries/id/transition]
+  end
+  subgraph board [Доска склада]
+    W[GET warehouse-orders] --> L
   end
   subgraph manual [Ручной / админ]
     M[POST deliveries/id/manual-transition]
@@ -270,17 +208,14 @@ flowchart TB
     R[POST pvz-handoff/resolve] --> C[POST pvz-handoff/confirm]
     C --> CD[Клиент: complete-delivery]
   end
-  Q[GET deliveries] --> W[Очередь на складе]
-  P[POST pvz-handoff/client-products] --> UI[Список товаров на выдаче]
 ```
 
 | Сценарий | Маршрут |
 | --- | --- |
-| Коробка по штатному маршруту | `lookup` → `transition` |
-| Другой склад в городе / исправление | `manual-transition` (employee или admin) |
-| Очередь на точке | `deliveries` |
+| Скан → следующий шаг | `lookup` → `transition` (без тела) |
+| Доска склада | `warehouse-orders` |
+| Нестандартный склад | `manual-transition` |
 | Клиент с QR | `pvz-handoff/resolve` → `confirm` |
-| Сводка товаров на выдаче | `pvz-handoff/client-products` |
 
 ## Related docs
 
@@ -299,6 +234,5 @@ flowchart TB
 | Admin manual controller | `marketplace-backend/src/modules/admin/warehouse-ops/controllers/admin-warehouse-ops.controller.ts` |
 | Service | `marketplace-backend/src/modules/employee/warehouse-ops/services/warehouse-ops.service.ts` |
 | Transition helper | `marketplace-backend/src/modules/employee/warehouse-ops/services/warehouse-ops-transition.helper.ts` |
-| Employee transition enum | `marketplace-backend/src/modules/employee/warehouse-ops/dto/employee-marketplace-transition-status.enum.ts` |
 | SQL | `marketplace-backend/src/modules/employee/warehouse-ops/sql/warehouse-ops.sql` |
 | Employee app | `marketplace-employee-app/src/app/page.tsx` |
